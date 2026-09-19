@@ -33,6 +33,30 @@ matters, pay the $72. It's worth it for production.
 
 ## How the architecture actually works
 
+The short version, in picture form:
+
+```mermaid
+flowchart TD
+    KC["kubectl on your laptop"] -->|"always points here, never changes"| EIP["Elastic IP"]
+    EIP --> M["Current master<br/>etcd + apiserver"]
+    M --> SL["snapshot-loop<br/>etcd + PKI bundle every ~12s"]
+    M --> WM["watcher-master<br/>polls IMDS every 5s"]
+
+    WM -->|"spot interruption notice lands"| HO["handoff.sh fires, once"]
+    HO --> PICK{"healthy worker<br/>already running?"}
+    PICK -->|"yes, fast path"| FAST["promote the existing worker"]
+    PICK -->|"no, default, slow path"| SLOW["scale ASG to 2<br/>boot a fresh spot instance"]
+
+    FAST --> BUNDLE["stream etcd + PKI bundle<br/>over a raw TCP socket"]
+    SLOW --> BUNDLE
+    BUNDLE --> RESTORE["new box restores etcd,<br/>rewrites manifests,<br/>binds the EIP to itself"]
+    RESTORE --> REASSOC["re-associate the<br/>Elastic IP to itself"]
+    REASSOC -.->|"EIP now points here instead"| EIP
+    REASSOC --> DIE["old master sleeps 20s,<br/>then self-terminates"]
+```
+
+And in words:
+
 1. The master boots, uses kubeadm (the same way EKS does), associates an Elastic IP to
    itself, and starts two background loops:
    - `snapshot-loop`: every ~12s, snapshots etcd and tars up PKI,

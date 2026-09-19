@@ -28,7 +28,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-
+.omo
 # Editor/OS cruft
 .DS_Store
 *.swp

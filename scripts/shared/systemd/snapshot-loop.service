@@ -1,0 +1,12 @@
+[Unit]
+Description=eks-killer local etcd+PKI snapshot loop
+After=kubelet.service
+
+[Service]
+Type=simple
+ExecStart=/opt/eks-killer/snapshot-loop.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

@@ -24,7 +24,7 @@ resource "aws_vpc" "this" {
   cidr_block           = var.vpc_cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
-  tags = { Name = "eks-killer-vpc" }
+  tags                 = { Name = "eks-killer-vpc" }
 }
 
 resource "aws_internet_gateway" "this" {
@@ -177,19 +177,64 @@ resource "aws_iam_instance_profile" "node" {
 # ---------------------------------------------------------------------------
 
 locals {
-  master_userdata = templatefile("${path.module}/../scripts/bootstrap-master.sh.tpl", {
+  scripts_dir = "${path.module}/../scripts"
+  shared_dir  = "${local.scripts_dir}/shared"
+  systemd_dir = "${local.shared_dir}/systemd"
+
+  pyreceiver_py                  = file("${local.shared_dir}/pyreceiver.py")
+  common_sh                      = file("${local.shared_dir}/common.sh")
+  snapshot_loop_sh               = file("${local.shared_dir}/snapshot-loop.sh")
+  watcher_master_sh              = file("${local.shared_dir}/watcher-master.sh")
+  watcher_worker_sh              = file("${local.shared_dir}/watcher-worker.sh")
+  handoff_sh                     = file("${local.shared_dir}/handoff.sh")
+  receiver_master_sh             = file("${local.shared_dir}/receiver-master.sh")
+  receiver_worker_sh             = file("${local.shared_dir}/receiver-worker.sh")
+  systemd_snapshot_loop_service  = file("${local.systemd_dir}/snapshot-loop.service")
+  systemd_watcher_master_service = file("${local.systemd_dir}/watcher-master.service")
+  systemd_watcher_worker_service = file("${local.systemd_dir}/watcher-worker.service")
+  systemd_receiver_service       = file("${local.systemd_dir}/receiver.service")
+  systemd_eip_lo_service = templatefile("${local.systemd_dir}/eip-lo.service.tpl", {
+    eip_public_ip = aws_eip.master.public_ip
+  })
+
+  master_userdata = templatefile("${local.scripts_dir}/master/bootstrap-master.sh.tpl", {
     eip_allocation_id  = aws_eip.master.id
     eip_public_ip      = aws_eip.master.public_ip
     handoff_port       = var.handoff_port
     pod_cidr           = var.pod_cidr
     kubernetes_version = var.kubernetes_version
     aws_region         = var.aws_region
+
+    pyreceiver_py                  = local.pyreceiver_py
+    common_sh                      = local.common_sh
+    snapshot_loop_sh               = local.snapshot_loop_sh
+    watcher_master_sh              = local.watcher_master_sh
+    watcher_worker_sh              = local.watcher_worker_sh
+    handoff_sh                     = local.handoff_sh
+    receiver_master_sh             = local.receiver_master_sh
+    systemd_snapshot_loop_service  = local.systemd_snapshot_loop_service
+    systemd_watcher_master_service = local.systemd_watcher_master_service
+    systemd_watcher_worker_service = local.systemd_watcher_worker_service
+    systemd_receiver_service       = local.systemd_receiver_service
+    systemd_eip_lo_service         = local.systemd_eip_lo_service
   })
 
-  worker_userdata = templatefile("${path.module}/../scripts/bootstrap-worker.sh.tpl", {
+  worker_userdata = templatefile("${local.scripts_dir}/worker/bootstrap-worker.sh.tpl", {
     handoff_port       = var.handoff_port
     kubernetes_version = var.kubernetes_version
     aws_region         = var.aws_region
+
+    pyreceiver_py                  = local.pyreceiver_py
+    common_sh                      = local.common_sh
+    snapshot_loop_sh               = local.snapshot_loop_sh
+    watcher_master_sh              = local.watcher_master_sh
+    watcher_worker_sh              = local.watcher_worker_sh
+    handoff_sh                     = local.handoff_sh
+    receiver_worker_sh             = local.receiver_worker_sh
+    systemd_snapshot_loop_service  = local.systemd_snapshot_loop_service
+    systemd_watcher_master_service = local.systemd_watcher_master_service
+    systemd_watcher_worker_service = local.systemd_watcher_worker_service
+    systemd_receiver_service       = local.systemd_receiver_service
   })
 }
 
@@ -227,8 +272,8 @@ resource "aws_launch_template" "master" {
   instance_market_options {
     market_type = "spot"
     spot_options {
-      max_price                     = var.master_spot_max_price != "" ? var.master_spot_max_price : null
-      spot_instance_type            = "one-time"
+      max_price                      = var.master_spot_max_price != "" ? var.master_spot_max_price : null
+      spot_instance_type             = "one-time"
       instance_interruption_behavior = "terminate"
     }
   }

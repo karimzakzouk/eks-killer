@@ -1,0 +1,13 @@
+[Unit]
+Description=eks-killer handoff bundle receiver
+After=kubelet.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/eks-killer/receiver.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

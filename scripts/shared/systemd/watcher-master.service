@@ -1,0 +1,12 @@
+[Unit]
+Description=eks-killer master spot-interruption watcher
+After=kubelet.service
+
+[Service]
+Type=simple
+ExecStart=/opt/eks-killer/watcher-master.sh
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

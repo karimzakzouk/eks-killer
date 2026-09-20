@@ -22,6 +22,10 @@ terraform {
       source  = "hashicorp/http"
       version = "~> 3.4"
     }
+    external = {
+      source  = "hashicorp/external"
+      version = "~> 2.4"
+    }
   }
 }
 

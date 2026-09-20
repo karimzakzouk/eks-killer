@@ -4,7 +4,7 @@
 # No etcd, no snapshot dance - the ASG relaunches a replacement on its own.
 
 set -uo pipefail
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 POLL_INTERVAL=5
 FIRED=0
@@ -14,7 +14,7 @@ log "watcher-worker: starting poll loop for node $NODE_NAME"
 
 while true; do
   token="$(imds_token)"
-  action="$(curl -s -o /dev/null -w '%%{http_code}' \
+  action="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "X-aws-ec2-metadata-token: ${token}" \
     http://169.254.169.254/latest/meta-data/spot/instance-action)"
 

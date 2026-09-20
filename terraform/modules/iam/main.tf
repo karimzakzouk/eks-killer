@@ -23,33 +23,41 @@ resource "aws_iam_role_policy" "node" {
     Version = "2012-10-17"
     Statement = [
       {
-        Sid    = "EC2AndAutoscalingControl"
+        Sid    = "EC2ReadOnlyAndEIPAssociate"
         Effect = "Allow"
         Action = [
-          "ec2:RunInstances",
-          "ec2:TerminateInstances",
-          "ec2:CreateTags",
           "ec2:DescribeInstances",
           "ec2:DescribeAddresses",
           "ec2:AssociateAddress",
           "ec2:DescribeSpotInstanceRequests",
           "ec2:DescribeInstanceStatus",
           "ec2:DescribeLaunchTemplates",
-          "ec2:DescribeLaunchTemplateVersions",
-          "autoscaling:DescribeAutoScalingGroups",
-          "autoscaling:SetDesiredCapacity",
-          "autoscaling:AttachInstances",
-          "autoscaling:DetachInstances",
-          "autoscaling:TerminateInstanceInAutoScalingGroup"
+          "ec2:DescribeLaunchTemplateVersions"
         ]
         Resource = "*"
       },
       {
-        Sid      = "PassSelfRoleOnly"
-        Effect   = "Allow"
-        Action   = "iam:PassRole"
-        Resource = aws_iam_role.node.arn
+        Sid    = "AutoscalingReadOnly"
+        Effect = "Allow"
+        Action = [
+          "autoscaling:DescribeAutoScalingGroups"
+        ]
+        Resource = "*"
       },
+      {
+        Sid    = "AutoscalingScopedToEksKillerProject"
+        Effect = "Allow"
+        Action = [
+          "autoscaling:SetDesiredCapacity",
+          "autoscaling:TerminateInstanceInAutoScalingGroup"
+        ]
+        Resource = "*"
+        Condition = {
+          StringEquals = {
+            "aws:ResourceTag/Project" = "eks-killer"
+          }
+        }
+      }
     ]
   })
 }

@@ -8,18 +8,21 @@ port = int(sys.argv[1]) if len(sys.argv) > 1 else 7777
 out_file = sys.argv[2] if len(sys.argv) > 2 else "/opt/eks-killer/incoming-bundle.tar"
 
 HEADER_MAGIC = b"ESKSUM"
-HEADER_TOTAL_BYTES = 129  # 128-byte fixed ASCII header + 1 newline
+HEADER_TOTAL_BYTES = 257  # 256-byte fixed ASCII header + 1 newline
+ESKSUM_PSK = b"eks-killer-handoff-psk-v1"
 
 print(f"[pyreceiver] Listening on port {port} -> {out_file}", flush=True)
 
 def extract_header_fields(header_text: str):
-    """Parse the 128-byte ASCII header: "ESKSUM sha256=<64-hex> size=<19-decimal> "
-    Returns (expected_sha256_hex, expected_size_int) or raises ValueError."""
+    """Parse the 256-byte ASCII header:
+       "ESKSUM sha256=<64-hex> size=<19-decimal> hmac=<64-hex> <padding>"
+    Returns (expected_sha256_hex, expected_size_int, expected_hmac_hex)
+    or raises ValueError."""
     try:
         after_magic = header_text.split("sha256=", 1)[1]
-        hash_part, size_part_raw = after_magic.split(" size=", 1)
+        hash_part, rest = after_magic.split(" size=", 1)
+        size_part_raw, hmac_part_raw = rest.split(" hmac=", 1)
         expected_hash = hash_part.strip()
-        # size field may be right-padded with spaces; stop at first non-decimal
         size_digits = ""
         for ch in size_part_raw:
             if ch.isdigit():
@@ -27,16 +30,26 @@ def extract_header_fields(header_text: str):
             else:
                 break
         expected_size = int(size_digits)
+        expected_hmac = hmac_part_raw.strip()
         if len(expected_hash) != 64:
             raise ValueError(f"bad hash length {len(expected_hash)}")
-        return expected_hash, expected_size
+        if len(expected_hmac) != 64:
+            raise ValueError(f"bad hmac length {len(expected_hmac)}")
+        return expected_hash, expected_size, expected_hmac
     except Exception as e:
         raise ValueError(f"header parse failed: {e!r}") from e
 
+def verify_hmac(expected_hash: str, expected_size: int, expected_hmac: str):
+    import hmac as _hmac
+    message = (expected_hash + str(expected_size)).encode()
+    computed = _hmac.new(ESKSUM_PSK, message, "sha256").hexdigest()
+    if not _hmac.compare_digest(computed, expected_hmac):
+        raise ValueError(f"HMAC MISMATCH: expected {expected_hmac}, computed {computed}")
+
 def validate_framed_stream(tmp_file: str, expected_hash: str, expected_size: int):
-    """Validate that the payload portion (bytes 129..end) matches the declared
-    hash + size in the header. Returns the actual payload size on success, or
-    raises ValueError describing the failure."""
+    """Validate that the payload portion (bytes HEADER_TOTAL_BYTES..end) matches
+    the declared hash + size in the header. Returns the actual payload size on
+    success, or raises ValueError describing the failure."""
     actual_size = os.path.getsize(tmp_file) - HEADER_TOTAL_BYTES
     if actual_size < 0:
         raise ValueError(f"stream smaller than framing header ({os.path.getsize(tmp_file)} bytes total)")
@@ -119,32 +132,38 @@ try:
                 total = 0
 
             if len(head) == HEADER_TOTAL_BYTES and head[:len(HEADER_MAGIC)] == HEADER_MAGIC and head[-1:] == b"\n":
-                # Stream uses the new ESKSUM framed protocol — validate hash + size
-                header_text = head[:128].decode("ascii", errors="replace")
+                # Stream uses the ESKSUM framed protocol — validate HMAC + hash + size
+                header_text = head[:(HEADER_TOTAL_BYTES - 1)].decode("ascii", errors="replace")
                 try:
-                    expected_hash, expected_size = extract_header_fields(header_text)
+                    expected_hash, expected_size, expected_hmac = extract_header_fields(header_text)
                 except ValueError as e:
                     print(f"[pyreceiver] Malformed ESKSUM header from {addr}: {e} — aborting (silently dropping)", flush=True)
                     total = 0
                 else:
                     try:
-                        payload_bytes = validate_framed_stream(out_file + ".tmp", expected_hash, expected_size)
+                        verify_hmac(expected_hash, expected_size, expected_hmac)
                     except ValueError as e:
-                        print(f"[pyreceiver] {e} from {addr} — CORRUPT STREAM, refusing to accept (still listening)", flush=True)
+                        print(f"[pyreceiver] {e} from {addr} — BAD HMAC (spoofed bundle?), refusing to accept", flush=True)
                         total = 0
                     else:
-                        framed_validated = True
-                        # Success: strip the 129-byte header, leaving only the payload
                         try:
-                            strip_header_to_payload(out_file + ".tmp", payload_bytes)
-                            total = payload_bytes
-                        except Exception as e:
-                            print(f"[pyreceiver] Failed stripping header: {e} — aborting", flush=True)
+                            payload_bytes = validate_framed_stream(out_file + ".tmp", expected_hash, expected_size)
+                        except ValueError as e:
+                            print(f"[pyreceiver] {e} from {addr} — CORRUPT STREAM, refusing to accept (still listening)", flush=True)
                             total = 0
+                        else:
+                            framed_validated = True
+                            # Success: strip the header, leaving only the payload
+                            try:
+                                strip_header_to_payload(out_file + ".tmp", payload_bytes)
+                                total = payload_bytes
+                            except Exception as e:
+                                print(f"[pyreceiver] Failed stripping header: {e} — aborting", flush=True)
+                                total = 0
             else:
-                # Back-compat: legacy unframed stream from an old sender. Accept
-                # as-is, just warn the user that no integrity check was done.
-                print(f"[pyreceiver] WARNING: legacy UNFRAMED stream from {addr} — no checksum verification possible (accepted for back-compat)", flush=True)
+                # Reject unframed streams: only checksummed framed transfers are accepted.
+                print(f"[pyreceiver] REJECTED: unframed stream from {addr} (total={total} bytes, no ESKSUM header) — dropped, still listening", flush=True)
+                total = 0
 
             if total == 0:
                 # Either an empty stream, or a framed stream whose validation
@@ -160,8 +179,7 @@ try:
                 continue
 
             os.replace(out_file + ".tmp", out_file)
-            mode_note = " (checksum + size verified)" if framed_validated else " (legacy unframed, no checksum)"
-            print(f"[pyreceiver] SUCCESS: Received {total} bytes into {out_file}{mode_note}", flush=True)
+            print(f"[pyreceiver] SUCCESS: Received {total} bytes into {out_file} (checksum + size verified)", flush=True)
             try:
                 conn.sendall(b"OK\n")
             except Exception:

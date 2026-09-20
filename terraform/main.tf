@@ -66,25 +66,6 @@ locals {
   effective_allowed_cidr = var.allowed_ssh_cidr != "" ? var.allowed_ssh_cidr : "${trimspace(data.http.my_public_ip[0].response_body)}/32"
 }
 
-# ── Scripts: read once at root level so relative paths resolve once ──────────
-
-locals {
-  scripts_dir = abspath("${path.module}/../scripts")
-
-  script_common          = file("${local.scripts_dir}/shared/common.sh")
-  script_receiver_worker = file("${local.scripts_dir}/shared/receiver-worker.sh")
-  script_receiver_master = file("${local.scripts_dir}/shared/receiver-master.sh")
-  script_handoff         = file("${local.scripts_dir}/shared/handoff.sh")
-  script_pyreceiver      = file("${local.scripts_dir}/shared/pyreceiver.py")
-  script_snapshot_loop   = file("${local.scripts_dir}/shared/snapshot-loop.sh")
-  script_watcher_master  = file("${local.scripts_dir}/shared/watcher-master.sh")
-  script_watcher_worker  = file("${local.scripts_dir}/shared/watcher-worker.sh")
-  svc_receiver           = file("${local.scripts_dir}/shared/systemd/receiver.service")
-  svc_snapshot           = file("${local.scripts_dir}/shared/systemd/snapshot-loop.service")
-  svc_watcher_master     = file("${local.scripts_dir}/shared/systemd/watcher-master.service")
-  svc_watcher_worker     = file("${local.scripts_dir}/shared/systemd/watcher-worker.service")
-}
-
 # ── Region lookup (needed for scripts inside userdata) ───────────────────────
 
 data "aws_region" "current" {}
@@ -100,6 +81,8 @@ module "networking" {
 
   vpc_cidr         = var.vpc_cidr
   subnet_cidr      = var.subnet_cidr
+  subnet_cidrs     = var.subnet_cidrs
+  az_count         = var.az_count
   allowed_ssh_cidr = local.effective_allowed_cidr
 }
 
@@ -107,6 +90,30 @@ module "iam" {
   source = "./modules/iam"
 
   enable_fis_role = var.enable_fis_spot_killer
+}
+
+data "external" "master_userdata" {
+  program = ["python3", "${path.module}/../scripts/compress-userdata.py", "master"]
+  query = {
+    handoff_port      = var.handoff_port
+    kubernetes_version = var.kubernetes_version
+    aws_region        = local.region
+    eip_allocation_id = module.networking.master_eip_allocation_id
+    eip_public_ip     = module.networking.master_eip_public_ip
+    pod_cidr          = var.pod_cidr
+  }
+}
+
+data "external" "worker_userdata" {
+  program = ["python3", "${path.module}/../scripts/compress-userdata.py", "worker"]
+  query = {
+    handoff_port      = var.handoff_port
+    kubernetes_version = var.kubernetes_version
+    aws_region        = local.region
+    eip_allocation_id = module.networking.master_eip_allocation_id
+    eip_public_ip     = module.networking.master_eip_public_ip
+    pod_cidr          = var.pod_cidr
+  }
 }
 
 module "compute" {
@@ -117,6 +124,7 @@ module "compute" {
   worker_instance_type  = var.worker_instance_type
   key_name              = local.effective_key_name
   subnet_id             = module.networking.subnet_id
+  subnet_ids            = module.networking.subnet_ids
   security_group_ids    = [module.networking.cluster_sg_id]
   instance_profile_arn  = module.iam.node_instance_profile_arn
   master_count          = var.master_count
@@ -125,45 +133,9 @@ module "compute" {
   worker_spot_max_price = var.worker_spot_max_price
   root_volume_size_gb   = var.root_volume_size_gb
 
-  master_userdata = templatefile("${path.module}/../scripts/master/bootstrap-master.sh.tpl", {
-    pyreceiver_py                  = local.script_pyreceiver
-    handoff_port                   = var.handoff_port
-    common_sh                      = local.script_common
-    snapshot_loop_sh               = local.script_snapshot_loop
-    watcher_master_sh              = local.script_watcher_master
-    watcher_worker_sh              = local.script_watcher_worker
-    handoff_sh                     = local.script_handoff
-    receiver_master_sh             = local.script_receiver_master
-    systemd_snapshot_loop_service  = local.svc_snapshot
-    systemd_watcher_master_service = local.svc_watcher_master
-    systemd_watcher_worker_service = local.svc_watcher_worker
-    systemd_receiver_service       = local.svc_receiver
-    systemd_eip_lo_service = templatefile("${local.scripts_dir}/shared/systemd/eip-lo.service.tpl", {
-      eip_public_ip = module.networking.master_eip_public_ip
-    })
-    kubernetes_version = var.kubernetes_version
-    aws_region         = local.region
-    eip_allocation_id  = module.networking.master_eip_allocation_id
-    eip_public_ip      = module.networking.master_eip_public_ip
-    pod_cidr           = var.pod_cidr
-  })
+  master_userdata = data.external.master_userdata.result.userdata
 
-  worker_userdata = templatefile("${path.module}/../scripts/worker/bootstrap-worker.sh.tpl", {
-    pyreceiver_py                  = local.script_pyreceiver
-    handoff_port                   = var.handoff_port
-    common_sh                      = local.script_common
-    snapshot_loop_sh               = local.script_snapshot_loop
-    watcher_master_sh              = local.script_watcher_master
-    watcher_worker_sh              = local.script_watcher_worker
-    handoff_sh                     = local.script_handoff
-    receiver_worker_sh             = local.script_receiver_worker
-    systemd_snapshot_loop_service  = local.svc_snapshot
-    systemd_watcher_master_service = local.svc_watcher_master
-    systemd_watcher_worker_service = local.svc_watcher_worker
-    systemd_receiver_service       = local.svc_receiver
-    kubernetes_version             = var.kubernetes_version
-    aws_region                     = local.region
-  })
+  worker_userdata = data.external.worker_userdata.result.userdata
 }
 
 module "fis" {

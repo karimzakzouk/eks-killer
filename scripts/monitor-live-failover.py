@@ -8,8 +8,8 @@ from datetime import datetime, timezone
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
 TERRAFORM_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../terraform"))
-KUBECONFIG = os.path.expanduser("~/.kube/eks-killer.conf")
-KEY_PATH = os.path.join(TERRAFORM_DIR, "key-pair.pem")
+KUBECONFIG = os.path.expanduser("~/.kube/eks-killer-admin.conf")
+KEY_PATH = os.path.join(TERRAFORM_DIR, "eks-killer.pem")
 
 def run_cmd(cmd, timeout=30):
     try:
@@ -32,9 +32,9 @@ def main():
     print("  EKS-KILLER: LIVE AWS FIS SPOT INTERRUPTION & HOT-POTATO BENCHMARK")
     print("=" * 75)
 
-    master_eip = get_tf_output("master_eip") or "3.91.4.226"
+    master_eip = get_tf_output("master_ip") or "3.91.4.226"
     asg_name = get_tf_output("master_asg_name")
-    exp_template_id = get_tf_output("spot_killer_experiment_id")
+    exp_template_id = get_tf_output("fis_experiment_template_id")
 
     print(f"Master EIP:       {master_eip}")
     print(f"Master ASG:       {asg_name}")
@@ -50,12 +50,17 @@ def main():
     print(f"Current Node(s):\n{nodes_out}")
 
     # Determine current master instance ID
-    rc, inst_out, _ = run_cmd(
-        f"aws ec2 describe-instances --region {REGION} "
-        f"--filters 'Name=ip-address,Values={master_eip}' "
-        f"--query 'Reservations[0].Instances[0].InstanceId' --output text"
+    rc, asg_inst_out, asg_inst_err = run_cmd(
+        f"aws autoscaling describe-auto-scaling-groups --region {REGION} "
+        f"--auto-scaling-group-names '{asg_name}' "
+        f"--query 'AutoScalingGroups[0].Instances[?LifecycleState==`InService`].InstanceId | [0]' "
+        f"--output text"
     )
-    old_instance_id = inst_out if rc == 0 else ""
+    old_instance_id = asg_inst_out if rc == 0 and asg_inst_out and asg_inst_out != "None" else ""
+    if not old_instance_id:
+        print(f"FATAL: could not determine the current master instance ID from ASG '{asg_name}'.")
+        print(f"  rc={rc}  stdout={asg_inst_out!r}  stderr={asg_inst_err!r}")
+        sys.exit(1)
     print(f"Origin Master Instance ID: {old_instance_id}")
 
     input_prompt = "Triggering AWS Spot Interruption via AWS FIS..."

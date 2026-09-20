@@ -5,7 +5,7 @@
 # re-points the Elastic IP once the target confirms it's up.
 
 set -uo pipefail
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 REGION="$(self_region)"
 export AWS_DEFAULT_REGION="$REGION"
@@ -165,10 +165,11 @@ main() {
 
   # Bundle delivery confirmed (TCP close + OK reply from receiver).
   # The replacement master associates the EIP itself after apiserver is healthy.
-  # Sleep 20s to allow promotion to complete, then self-terminate.
-  log "handoff: bundle acknowledged. Sleeping 20s then self-terminating."
+  # Sleep 90s to allow promotion to complete (etcd restore, apiserver boot,
+  # up to 60s of EIP association retries), then self-terminate.
+  log "handoff: bundle acknowledged. Sleeping 90s then self-terminating."
   rm -f /opt/eks-killer/spare-instance-id
-  sleep 20
+  sleep 90
   log "handoff: COMPLETE, self-terminating ($self_id)"
   aws ec2 terminate-instances --instance-ids "$self_id" >/dev/null 2>&1 || true
 }

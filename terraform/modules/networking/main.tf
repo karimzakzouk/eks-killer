@@ -28,14 +28,25 @@ resource "aws_internet_gateway" "this" {
   }
 }
 
+locals {
+  _az_count     = min(var.az_count, length(data.aws_availability_zones.available.names))
+  # CIDR resolution order: explicit subnet_cidrs[] > legacy var.subnet_cidr > derive /24s from vpc_cidr
+  effective_cidrs = length(var.subnet_cidrs) > 0 ? var.subnet_cidrs : (
+    var.subnet_cidr != "" ? [var.subnet_cidr] : [
+      for i in range(local._az_count) : cidrsubnet(var.vpc_cidr, 8, i + 1)
+    ]
+  )
+}
+
 resource "aws_subnet" "this" {
+  count                   = local._az_count
   vpc_id                  = aws_vpc.this.id
-  cidr_block              = var.subnet_cidr
-  availability_zone       = data.aws_availability_zones.available.names[0]
+  cidr_block              = local.effective_cidrs[count.index]
+  availability_zone       = data.aws_availability_zones.available.names[count.index]
   map_public_ip_on_launch = true
 
   tags = merge(var.tags, {
-    Name = "eks-killer-subnet"
+    Name = "eks-killer-subnet-${data.aws_availability_zones.available.names[count.index]}"
   })
 
   lifecycle {
@@ -61,7 +72,8 @@ resource "aws_route_table" "this" {
 }
 
 resource "aws_route_table_association" "this" {
-  subnet_id      = aws_subnet.this.id
+  count          = local._az_count
+  subnet_id      = aws_subnet.this[count.index].id
   route_table_id = aws_route_table.this.id
 }
 

@@ -5,7 +5,7 @@
 # watchdog removes the spare if no interruption follows (false alarm).
 
 set -uo pipefail
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 POLL_INTERVAL=5
 FIRED=0
@@ -15,10 +15,10 @@ log "watcher-master: starting poll loop (interruption + rebalance)"
 
 while true; do
   token="$(imds_token)"
-  action="$(curl -s -o /dev/null -w '%%{http_code}' \
+  action="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "X-aws-ec2-metadata-token: ${token}" \
     http://169.254.169.254/latest/meta-data/spot/instance-action)"
-  reb="$(curl -s -o /dev/null -w '%%{http_code}' \
+  reb="$(curl -s -o /dev/null -w '%{http_code}' \
     -H "X-aws-ec2-metadata-token: ${token}" \
     http://169.254.169.254/latest/meta-data/events/recommendations/rebalance)"
 
@@ -41,7 +41,7 @@ while true; do
     # the spare we launched is unneeded - terminate that exact instance.
     ( sleep "$WATCHDOG_DELAY"
       wtoken="$(imds_token)"
-      waction="$(curl -s -o /dev/null -w '%%{http_code}' \
+      waction="$(curl -s -o /dev/null -w '%{http_code}' \
         -H "X-aws-ec2-metadata-token: ${wtoken}" \
         http://169.254.169.254/latest/meta-data/spot/instance-action)"
       wself="$(self_instance_id)"

@@ -42,9 +42,9 @@ with zipfile.ZipFile('/tmp/awscliv2.zip') as z:
 ) >/dev/null 2>&1 &
 AWS_INSTALL_PID=$!
 
-cat > /opt/eks-killer/common.sh <<'COMMON_EOF'
-${common_sh}
-COMMON_EOF
+cat > /opt/eks-killer/common-core.sh <<'COMMON_CORE_EOF'
+${common_core_sh}
+COMMON_CORE_EOF
 
 cat > /opt/eks-killer/snapshot-loop.sh <<'SNAPSHOT_EOF'
 ${snapshot_loop_sh}
@@ -86,7 +86,7 @@ chmod +x /opt/eks-killer/*.sh
 sed -i "s/__HANDOFF_PORT__/${handoff_port}/g" /opt/eks-killer/handoff.sh /opt/eks-killer/receiver.sh
 systemctl daemon-reload
 
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 install_k8s_packages "${kubernetes_version}"
 install_etcdctl

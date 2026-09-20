@@ -3,6 +3,11 @@ locals {
 
   effective_master_spot_max = var.master_spot_max_price != "" ? var.master_spot_max_price : null
   effective_worker_spot_max = var.worker_spot_max_price != "" ? var.worker_spot_max_price : null
+
+  # Subnets for ASG vpc_zone_identifier: prefer explicit subnet_ids[], else fall back to single subnet_id
+  effective_subnet_ids = length(var.subnet_ids) > 0 ? var.subnet_ids : (
+    var.subnet_id != "" ? [var.subnet_id] : []
+  )
 }
 
 data "aws_ami" "ubuntu" {
@@ -46,19 +51,15 @@ resource "aws_launch_template" "master" {
 
   network_interfaces {
     associate_public_ip_address = true
-    subnet_id                   = var.subnet_id
     security_groups             = var.security_group_ids
   }
 
-  dynamic "instance_market_options" {
-    for_each = local.effective_master_spot_max != null ? [1] : []
-    content {
-      market_type = "spot"
-      spot_options {
-        max_price                      = local.effective_master_spot_max
-        spot_instance_type             = "one-time"
-        instance_interruption_behavior = "terminate"
-      }
+  instance_market_options {
+    market_type = "spot"
+    spot_options {
+      max_price                      = local.effective_master_spot_max
+      spot_instance_type             = "one-time"
+      instance_interruption_behavior = "terminate"
     }
   }
 
@@ -75,6 +76,12 @@ resource "aws_launch_template" "master" {
     })
   }
 
+  # EC2/cloud-init auto-detects gzip-compressed user data (via its magic bytes)
+  # and decompresses it before running it, so no decode wrapper is needed here.
+  # base64gzip() keeps this comfortably under the 16384-byte raw user_data limit
+  # (an xz-compressed blob re-embedded as base64 *text* in a shell wrapper, as
+  # this used to do, inflates ~33% past the limit even though the underlying
+  # compressed payload was small).
   user_data = base64gzip(var.master_userdata)
 
   lifecycle {
@@ -87,7 +94,7 @@ resource "aws_autoscaling_group" "master" {
   desired_capacity    = var.master_count
   min_size            = var.master_count
   max_size            = local.master_asg_max_size
-  vpc_zone_identifier = [var.subnet_id]
+  vpc_zone_identifier = local.effective_subnet_ids
 
   launch_template {
     id      = aws_launch_template.master.id
@@ -145,19 +152,15 @@ resource "aws_launch_template" "worker" {
 
   network_interfaces {
     associate_public_ip_address = true
-    subnet_id                   = var.subnet_id
     security_groups             = var.security_group_ids
   }
 
-  dynamic "instance_market_options" {
-    for_each = local.effective_worker_spot_max != null ? [1] : []
-    content {
-      market_type = "spot"
-      spot_options {
-        max_price                      = local.effective_worker_spot_max
-        spot_instance_type             = "one-time"
-        instance_interruption_behavior = "terminate"
-      }
+  instance_market_options {
+    market_type = "spot"
+    spot_options {
+      max_price                      = local.effective_master_spot_max
+      spot_instance_type             = "one-time"
+      instance_interruption_behavior = "terminate"
     }
   }
 
@@ -173,6 +176,7 @@ resource "aws_launch_template" "worker" {
     })
   }
 
+  # See the comment on aws_launch_template.master.user_data above.
   user_data = base64gzip(var.worker_userdata)
 
   lifecycle {
@@ -185,7 +189,7 @@ resource "aws_autoscaling_group" "worker" {
   desired_capacity    = var.worker_count
   min_size            = var.worker_count
   max_size            = var.worker_count + 2 # surge-replace headroom during worker-promotion backfill
-  vpc_zone_identifier = [var.subnet_id]
+  vpc_zone_identifier = local.effective_subnet_ids
 
   launch_template {
     id      = aws_launch_template.worker.id

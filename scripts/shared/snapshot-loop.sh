@@ -4,7 +4,7 @@
 # this control plane elsewhere. Kept purely local - no S3, no network calls.
 
 set -uo pipefail
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 SNAPSHOT_INTERVAL="${SNAPSHOT_INTERVAL:-12}"
 BUNDLE_DIR="/opt/eks-killer/bundle"
@@ -32,12 +32,19 @@ while true; do
       [ -f /var/lib/kubelet/config.yaml ] && cp /var/lib/kubelet/config.yaml "${STAGING_DIR}/var-lib-kubelet/config.yaml"
       [ -f /var/lib/kubelet/kubeadm-flags.env ] && cp /var/lib/kubelet/kubeadm-flags.env "${STAGING_DIR}/var-lib-kubelet/kubeadm-flags.env"
     fi
-    self_private_ip >"${STAGING_DIR}/origin-private-ip.txt"
-    hostname >"${STAGING_DIR}/origin-node-name.txt"
+  self_private_ip >"${STAGING_DIR}/origin-private-ip.txt"
+  hostname >"${STAGING_DIR}/origin-node-name.txt"
+  cp /opt/eks-killer/common-promote.sh "${STAGING_DIR}/common-promote.sh"
 
-    tar -C "$STAGING_DIR" -czf "${BUNDLE_DIR}/handoff-bundle.tar.gz.new" .
+  tar -C "$STAGING_DIR" -czf "${BUNDLE_DIR}/handoff-bundle.tar.gz.new" .
+    # 3-bundle rotation: never have only one copy — a partially-written or
+    # corrupt etcd snapshot will not clobber all recoverable history.
+    [ -f "${BUNDLE_DIR}/handoff-bundle-3.tar.gz" ] && rm -f "${BUNDLE_DIR}/handoff-bundle-3.tar.gz"
+    [ -f "${BUNDLE_DIR}/handoff-bundle-2.tar.gz" ] && mv "${BUNDLE_DIR}/handoff-bundle-2.tar.gz" "${BUNDLE_DIR}/handoff-bundle-3.tar.gz"
+    [ -f "${BUNDLE_DIR}/handoff-bundle-1.tar.gz" ] && mv "${BUNDLE_DIR}/handoff-bundle-1.tar.gz" "${BUNDLE_DIR}/handoff-bundle-2.tar.gz"
+    [ -f "${BUNDLE_DIR}/handoff-bundle.tar.gz" ] && mv "${BUNDLE_DIR}/handoff-bundle.tar.gz" "${BUNDLE_DIR}/handoff-bundle-1.tar.gz"
     mv "${BUNDLE_DIR}/handoff-bundle.tar.gz.new" "${BUNDLE_DIR}/handoff-bundle.tar.gz"
-    rm -rf "${STAGING_DIR}/pki" "${STAGING_DIR}/manifests" "${STAGING_DIR}/var-lib-kubelet"
+    rm -rf "${STAGING_DIR}/pki" "${STAGING_DIR}/manifests" "${STAGING_DIR}/var-lib-kubelet" "${STAGING_DIR}/common-promote.sh"
 
     # Pre-cache control plane container images once for instant peer-streaming on fallback
     if [ ! -f "${BUNDLE_DIR}/k8s-images.tar" ]; then

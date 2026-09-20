@@ -41,9 +41,9 @@ with zipfile.ZipFile('/tmp/awscliv2.zip') as z:
 AWS_INSTALL_PID=$!
 
 
-cat > /opt/eks-killer/common.sh <<'COMMON_EOF'
-${common_sh}
-COMMON_EOF
+cat > /opt/eks-killer/common-core.sh <<'COMMON_CORE_EOF'
+${common_core_sh}
+COMMON_CORE_EOF
 
 cat > /opt/eks-killer/snapshot-loop.sh <<'SNAPSHOT_EOF'
 ${snapshot_loop_sh}
@@ -52,10 +52,6 @@ SNAPSHOT_EOF
 cat > /opt/eks-killer/watcher-master.sh <<'WATCHERMASTER_EOF'
 ${watcher_master_sh}
 WATCHERMASTER_EOF
-
-cat > /opt/eks-killer/watcher-worker.sh <<'WATCHERWORKER_EOF'
-${watcher_worker_sh}
-WATCHERWORKER_EOF
 
 cat > /opt/eks-killer/handoff.sh <<'HANDOFF_EOF'
 ${handoff_sh}
@@ -73,23 +69,18 @@ cat > /etc/systemd/system/watcher-master.service <<'SYSTEMD_WMASTER_EOF'
 ${systemd_watcher_master_service}
 SYSTEMD_WMASTER_EOF
 
-cat > /etc/systemd/system/watcher-worker.service <<'SYSTEMD_WWORKER_EOF'
-${systemd_watcher_worker_service}
-SYSTEMD_WWORKER_EOF
-
-cat > /etc/systemd/system/receiver.service <<'SYSTEMD_RECEIVER_EOF'
-${systemd_receiver_service}
-SYSTEMD_RECEIVER_EOF
-
 cat > /etc/systemd/system/eip-lo.service <<'SYSTEMD_EIPLO_EOF'
 ${systemd_eip_lo_service}
 SYSTEMD_EIPLO_EOF
+
+mkdir -p /opt/eks-killer/systemd
+cp /etc/systemd/system/eip-lo.service /opt/eks-killer/systemd/eip-lo.service
 
 chmod +x /opt/eks-killer/*.sh
 sed -i "s/__HANDOFF_PORT__/${handoff_port}/g" /opt/eks-killer/handoff.sh /opt/eks-killer/receiver.sh
 systemctl daemon-reload
 
-source /opt/eks-killer/common.sh
+source /opt/eks-killer/common-core.sh
 
 install_k8s_packages "${kubernetes_version}" &
 INSTALL_PID=$!
@@ -209,18 +200,35 @@ if [ "$BOOT_MODE" != "replacement" ]; then
     https://raw.githubusercontent.com/projectcalico/calico/v3.28.0/manifests/calico.yaml \
     >>/var/log/eks-killer.log 2>&1 || log "bootstrap-master: WARNING calico apply failed, retry manually"
 
+  INIT_NODE_NAME="$(hostname)"
+  KUBECONFIG=/etc/kubernetes/admin.conf kubectl label node "$INIT_NODE_NAME" \
+    node-role.kubernetes.io/control-plane= role=master --overwrite >>/var/log/eks-killer.log 2>&1 || true
+  KUBECONFIG=/etc/kubernetes/admin.conf kubectl taint node "$INIT_NODE_NAME" \
+    node-role.kubernetes.io/control-plane:NoSchedule- >>/var/log/eks-killer.log 2>&1 || true
+
   JOIN_CMD="$(kubeadm token create --print-join-command --ttl 0 2>>/var/log/eks-killer.log) --node-labels=role=worker --ignore-preflight-errors=Mem"
 
   # Start a lightweight HTTP metadata server so workers can discover the join
-  # command and admin.conf without SSM. Port 7778, internal VPC only.
+  # command and admin.conf without SSM. Port 7778, bound to private IP only
+  # (no 0.0.0.0 — intra-SG reachability from workers is sufficient).
   python3 -c "
-import http.server, base64, os, threading
+import http.server, base64, urllib.request, socket
 
 JOIN = open('/opt/eks-killer/join-command','w')
 JOIN.write('$${JOIN_CMD}')
 JOIN.close()
 ADMIN = base64.b64encode(open('/etc/kubernetes/admin.conf','rb').read()).decode()
 open('/opt/eks-killer/admin-conf-b64','w').write(ADMIN)
+
+def _imdsv2_get(path):
+    req = urllib.request.Request('http://169.254.169.254/latest/api/token', method='PUT')
+    req.add_header('X-aws-ec2-metadata-token-ttl-seconds', '21600')
+    token = urllib.request.urlopen(req, timeout=5).read().decode()
+    req2 = urllib.request.Request('http://169.254.169.254/latest/meta-data/' + path)
+    req2.add_header('X-aws-ec2-metadata-token', token)
+    return urllib.request.urlopen(req2, timeout=5).read().decode()
+
+bind_ip = _imdsv2_get('local-ipv4')
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *a): pass
@@ -234,27 +242,15 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Length', len(body)); self.end_headers()
         self.wfile.write(body)
 
-s = http.server.HTTPServer(('0.0.0.0', 7778), H)
+s = http.server.HTTPServer((bind_ip, 7778), H)
 s.serve_forever()
 " >> /var/log/eks-killer.log 2>&1 &
   echo $! > /opt/eks-killer/metadata-server.pid
   log "bootstrap-master: metadata server started on :7778 (join-command + admin-conf for workers)"
 
-  # Authoritative post-init EIP claim: 12 retries × 5s = 60s bounded loop
-  ASSOCIATED=0
-  for i in $(seq 1 12); do
-    if aws ec2 associate-address --instance-id "$SELF_ID" \
-      --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1; then
-      ASSOCIATED=1
-      break
-    fi
-    sleep 5
-  done
-  if [ "$ASSOCIATED" -eq 1 ]; then
-    log "bootstrap-master: EIP ${eip_public_ip} authoritatively associated to $SELF_ID"
-  else
-    log "bootstrap-master: WARNING post-init EIP association FAILED after 60s retries — user may not reach apiserver via EIP"
-  fi
+  # Authoritative post-init EIP claim: bounded 10min retry via common helper
+  associate_eip_bounded "${eip_allocation_id}" "$SELF_ID" "$REGION" "${eip_public_ip}" \
+    || log "bootstrap-master: WARNING post-init EIP association FAILED after bounded retries — user may not reach apiserver via EIP"
 
   systemctl enable --now snapshot-loop.service
   systemctl enable --now watcher-master.service
@@ -370,21 +366,9 @@ else
       exit 1
     fi
 
-    # Associate EIP to self now that apiserver is healthy — 60s bounded retry loop
-    ASSOCIATED=0
-    for i in $(seq 1 12); do
-      if aws ec2 associate-address --instance-id "$SELF_ID" \
-        --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1; then
-        ASSOCIATED=1
-        break
-      fi
-      sleep 5
-    done
-    if [ "$ASSOCIATED" -eq 1 ]; then
-      log "bootstrap-master: EIP ${eip_public_ip} successfully associated to $SELF_ID after replacement"
-    else
-      log "bootstrap-master: FATAL replacement EIP association FAILED after 60s retries — cluster local-only healthy, EIP STUCK"
-    fi
+    # Associate EIP to self now that apiserver is healthy — bounded 10min retry loop
+    associate_eip_bounded "${eip_allocation_id}" "$SELF_ID" "$REGION" "${eip_public_ip}" \
+      || { log "bootstrap-master: FATAL replacement EIP association FAILED after bounded retries — cluster local-only healthy, EIP STUCK"; exit 1; }
 
 
     ORIGIN_NODE_NAME="$(cat /opt/eks-killer/restore/origin-node-name.txt 2>/dev/null || echo '')"
@@ -409,11 +393,21 @@ else
     kill "$(cat /opt/eks-killer/metadata-server.pid 2>/dev/null)" 2>/dev/null || true
     NEW_JOIN_CMD="$(kubeadm token create --print-join-command --ttl 0 2>>/var/log/eks-killer.log) --node-labels=role=worker --ignore-preflight-errors=Mem"
     python3 -c "
-import http.server, base64
+import http.server, base64, urllib.request
 
 open('/opt/eks-killer/join-command','w').write('$${NEW_JOIN_CMD}')
 ADMIN = base64.b64encode(open('/etc/kubernetes/admin.conf','rb').read()).decode()
 open('/opt/eks-killer/admin-conf-b64','w').write(ADMIN)
+
+def _imdsv2_get(path):
+    req = urllib.request.Request('http://169.254.169.254/latest/api/token', method='PUT')
+    req.add_header('X-aws-ec2-metadata-token-ttl-seconds', '21600')
+    token = urllib.request.urlopen(req, timeout=5).read().decode()
+    req2 = urllib.request.Request('http://169.254.169.254/latest/meta-data/' + path)
+    req2.add_header('X-aws-ec2-metadata-token', token)
+    return urllib.request.urlopen(req2, timeout=5).read().decode()
+
+bind_ip = _imdsv2_get('local-ipv4')
 
 class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, fmt, *a): pass
@@ -427,7 +421,7 @@ class H(http.server.BaseHTTPRequestHandler):
         self.send_response(200); self.send_header('Content-Length', len(body)); self.end_headers()
         self.wfile.write(body)
 
-http.server.HTTPServer(('0.0.0.0', 7778), H).serve_forever()
+http.server.HTTPServer((bind_ip, 7778), H).serve_forever()
 " >> /var/log/eks-killer.log 2>&1 &
     echo $! > /opt/eks-killer/metadata-server.pid
 

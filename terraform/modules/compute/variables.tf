@@ -24,8 +24,15 @@ variable "key_name" {
 }
 
 variable "subnet_id" {
-  description = "Public subnet ID to launch all instances into (from networking module)."
+  description = "DEPRECATED: use subnet_ids[] for multi-AZ support. Single subnet ID — ignored if subnet_ids[] is non-empty."
   type        = string
+  default     = ""
+}
+
+variable "subnet_ids" {
+  description = "List of public subnet IDs to launch instances across (one per AZ). ASG's vpc_zone_identifier = this list."
+  type        = list(string)
+  default     = []
 }
 
 variable "security_group_ids" {
@@ -39,12 +46,12 @@ variable "instance_profile_arn" {
 }
 
 variable "master_userdata" {
-  description = "Raw userdata script for master instances (templatefile output — will be base64+gzipped by the module)."
+  description = "Compressed userdata script for master instances (xz+base64 from external data source)."
   type        = string
 }
 
 variable "worker_userdata" {
-  description = "Raw userdata script for worker instances (templatefile output — will be base64+gzipped by the module)."
+  description = "Compressed userdata script for worker instances (xz+base64 from external data source)."
   type        = string
 }
 

@@ -20,7 +20,7 @@ REGION="${AWS_DEFAULT_REGION:-us-east-1}"
 echo "[eks-killer] Looking up AWS FIS Spot Killer template..."
 EXPERIMENT_ID=""
 if [ -d "$TERRAFORM_DIR" ]; then
-  EXPERIMENT_ID="$(terraform -chdir="$TERRAFORM_DIR" output -raw spot_killer_experiment_id 2>/dev/null || true)"
+  EXPERIMENT_ID="$(terraform -chdir="$TERRAFORM_DIR" output -raw fis_experiment_template_id 2>/dev/null || true)"
 fi
 
 if [ -z "$EXPERIMENT_ID" ] || [ "$EXPERIMENT_ID" = "None" ]; then

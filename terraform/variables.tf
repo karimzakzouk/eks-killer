@@ -7,15 +7,39 @@ variable "aws_region" {
 }
 
 variable "vpc_cidr" {
-  description = "CIDR block for the eks-killer VPC (1 subnet, 1 AZ — deliberately flat)."
+  description = "CIDR block for the eks-killer VPC (az_count subnets — deliberately flat, no NAT)."
   type        = string
   default     = "10.42.0.0/16"
 }
 
 variable "subnet_cidr" {
-  description = "CIDR block for the single eks-killer public subnet inside the VPC."
+  description = "DEPRECATED / BACK-COMPAT ONLY (az_count=1): single public subnet CIDR. Use az_count=N + subnet_cidrs[] for multi-AZ."
   type        = string
   default     = "10.42.1.0/24"
+}
+
+variable "subnet_cidrs" {
+  description = "Optional explicit list of public subnet CIDRs, one per AZ. Length MUST equal az_count. Default empty = auto-derive /24s inside var.vpc_cidr using cidrsubnet(vpc_cidr, 8, index+1)."
+  type        = list(string)
+  default     = []
+}
+
+variable "az_count" {
+  description = <<EOF
+Number of Availability Zones to span.
+  1 = default (zero cross-AZ cost, single AZ outage kills the cluster).
+  3 = span 3 AZs — ASG launches replacement master in a healthy AZ on outage.
+For eks-killer single-master, only 1 master is live at any time, so the AZ
+diversity only helps when the current AZ dies and the ASG cold-launches a
+replacement in one of the other 2 AZs (takes ~90s plus boot time).
+EOF
+  type        = number
+  default     = 1
+
+  validation {
+    condition     = contains([1, 2, 3], var.az_count)
+    error_message = "az_count must be 1 (default), 2, or 3."
+  }
 }
 
 # ── Cluster Mode & Sizing ────────────────────────────────────────────────────
@@ -137,7 +161,7 @@ variable "allowed_ssh_cidr" {
   description = <<EOF
 CIDR allowed to reach TCP/22 (SSH) and TCP/6443 (Kubernetes API server).
 Default when empty string "" = auto-detect your current public IP at
-terraform apply time via https://ifconfig.me and pin it as a /32. Use
+terraform apply time via https://api.ipify.org and pin it as a /32. Use
 0.0.0.0/0 ONLY if you understand the security trade-offs and have compensating
 controls (SSM Sessions Manager-only, strong key rotation, etc).
 EOF

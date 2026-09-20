@@ -4,8 +4,13 @@ output "vpc_id" {
 }
 
 output "subnet_id" {
-  value       = aws_subnet.this.id
-  description = "Single public subnet ID where all instances launch."
+  value       = aws_subnet.this[0].id
+  description = "Back-compat: first (or only) public subnet ID. Prefer subnet_ids[] if az_count > 1."
+}
+
+output "subnet_ids" {
+  value       = aws_subnet.this[*].id
+  description = "List of all public subnet IDs, one per AZ. Length = az_count."
 }
 
 output "cluster_sg_id" {
@@ -23,7 +28,12 @@ output "master_eip_allocation_id" {
   description = "Allocation ID used by handoff.sh to re-associate the EIP between masters during failover."
 }
 
+output "availability_zones" {
+  value       = [for i in range(min(var.az_count, length(data.aws_availability_zones.available.names))) : data.aws_availability_zones.available.names[i]]
+  description = "List of AZs spanned by subnet_ids[]. Length = az_count."
+}
+
 output "availability_zone" {
   value       = data.aws_availability_zones.available.names[0]
-  description = "AZ the single subnet is pinned to (eks-killer runs in one AZ by design — not HA at infrastructure level)."
+  description = "Back-compat: first (or only) AZ — use availability_zones[] when az_count > 1."
 }

@@ -171,14 +171,27 @@ if [ "$BOOT_MODE" != "replacement" ]; then
   log "bootstrap-master: FRESH INIT path (Day-1 cluster bootstrap)"
   kill -9 "$PYRECEIVER_PID" 2>/dev/null || true
 
-  aws ec2 associate-address --instance-id "$SELF_ID" \
-    --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null || \
-    log "bootstrap-master: WARNING pre-init EIP association failed, will retry after init"
+  # Quick pre-init EIP claim — best-effort with a few retries; post-init re-claims authoritatively
+  for i in $(seq 1 5); do
+    if aws ec2 associate-address --instance-id "$SELF_ID" \
+      --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1; then
+      break
+    fi
+    sleep 2
+  done
+  if ! aws ec2 describe-addresses --allocation-ids "${eip_allocation_id}" --region "$REGION" \
+    --query 'Addresses[0].InstanceId' --output text 2>/dev/null | grep -q "$SELF_ID"; then
+    log "bootstrap-master: WARNING pre-init EIP association failed after retries, will retry after init"
+  fi
 
   systemctl enable --now eip-lo.service || true
 
-  log "bootstrap-master: waiting for background image pre-pulls to finish"
-  wait_for_image_pulls
+  # NOTE: intentionally do NOT block here with wait_for_image_pulls.
+  # Pre-pulls continue in the background; kubeadm init pulls the 4 control-plane
+  # images itself in ~5s, and Calico pods will ImagePullBackoff-retry until
+  # their pre-pulls land. Saving ~45s of cold-boot time on the critical
+  # 120s spot-notice slow path.
+  log "bootstrap-master: background image pre-pulls running (not waiting — continuing immediately)"
 
   kubeadm init \
     --control-plane-endpoint="${eip_public_ip}:6443" \
@@ -227,8 +240,21 @@ s.serve_forever()
   echo $! > /opt/eks-killer/metadata-server.pid
   log "bootstrap-master: metadata server started on :7778 (join-command + admin-conf for workers)"
 
-  aws ec2 associate-address --instance-id "$SELF_ID" \
-    --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null
+  # Authoritative post-init EIP claim: 12 retries × 5s = 60s bounded loop
+  ASSOCIATED=0
+  for i in $(seq 1 12); do
+    if aws ec2 associate-address --instance-id "$SELF_ID" \
+      --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1; then
+      ASSOCIATED=1
+      break
+    fi
+    sleep 5
+  done
+  if [ "$ASSOCIATED" -eq 1 ]; then
+    log "bootstrap-master: EIP ${eip_public_ip} authoritatively associated to $SELF_ID"
+  else
+    log "bootstrap-master: WARNING post-init EIP association FAILED after 60s retries — user may not reach apiserver via EIP"
+  fi
 
   systemctl enable --now snapshot-loop.service
   systemctl enable --now watcher-master.service
@@ -344,10 +370,21 @@ else
       exit 1
     fi
 
-    # Associate EIP to self now that apiserver is healthy
-    aws ec2 associate-address --instance-id "$SELF_ID" \
-      --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1 || true
-    log "bootstrap-master: EIP ${eip_public_ip} successfully associated to $SELF_ID"
+    # Associate EIP to self now that apiserver is healthy — 60s bounded retry loop
+    ASSOCIATED=0
+    for i in $(seq 1 12); do
+      if aws ec2 associate-address --instance-id "$SELF_ID" \
+        --allocation-id "${eip_allocation_id}" --allow-reassociation --region "$REGION" >/dev/null 2>&1; then
+        ASSOCIATED=1
+        break
+      fi
+      sleep 5
+    done
+    if [ "$ASSOCIATED" -eq 1 ]; then
+      log "bootstrap-master: EIP ${eip_public_ip} successfully associated to $SELF_ID after replacement"
+    else
+      log "bootstrap-master: FATAL replacement EIP association FAILED after 60s retries — cluster local-only healthy, EIP STUCK"
+    fi
 
 
     ORIGIN_NODE_NAME="$(cat /opt/eks-killer/restore/origin-node-name.txt 2>/dev/null || echo '')"

@@ -100,15 +100,25 @@ nc_send() {
 send_bundle() {
   local ip="$1"
   local is_worker="${2:-1}"
+  local framed_source
   log "handoff: sending bundle to ${ip}:${HANDOFF_PORT}"
   if [ "$is_worker" -eq 1 ]; then
-    cat "$BUNDLE" | nc_send "$ip" || return 1
+    framed_source="$BUNDLE"
+    log "handoff: framed transfer mode (checksum+size framed) for worker fast-path bundle"
+    frame_send "$framed_source" | nc_send "$ip" || return 1
   else
     if [ -f "/opt/eks-killer/bundle/k8s-images.tar" ]; then
-      log "handoff: peer-streaming etcd+pki bundle AND k8s-images.tar to fresh instance (uncompressed fast stream)"
-      tar -C /opt/eks-killer/bundle -cf - handoff-bundle.tar.gz k8s-images.tar | nc_send "$ip" || return 1
+      log "handoff: peer-streaming etcd+pki bundle AND k8s-images.tar to fresh instance (composite framed, checksum-verified)"
+      framed_source="/tmp/eks-killer-composite-bundle-$$.tar"
+      tar -C /opt/eks-killer/bundle -cf "$framed_source" handoff-bundle.tar.gz k8s-images.tar
+      frame_send "$framed_source" | nc_send "$ip"
+      local rc=$?
+      rm -f "$framed_source"
+      return $rc
     else
-      cat "$BUNDLE" | nc_send "$ip" || return 1
+      framed_source="$BUNDLE"
+      log "handoff: framed transfer mode (checksum+size framed) for replacement-master slow-path bundle"
+      frame_send "$framed_source" | nc_send "$ip" || return 1
     fi
   fi
 }

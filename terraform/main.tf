@@ -1,3 +1,52 @@
+# ── Compute local defaults & resolve runtime values ──────────────────────────
+
+# Auto-detect the user's current public IPv4 address so SSH + k8s API are
+# reachable without hardcoding a random CIDR. Fallback: 127.0.0.1/32 (which
+# breaks nothing since it's only from localhost) if the lookup fails.
+data "http" "my_public_ip" {
+  url = "https://ifconfig.me/ip"
+
+  request_headers = {
+    Accept = "text/plain"
+  }
+
+  lifecycle {
+    precondition {
+      condition     = can(regex("^([0-9]{1,3}\\.){3}[0-9]{1,3}$", chomp(self.response_body)))
+      error_message = "Auto-detection of your public IP via ifconfig.me returned a non-IPv4 body: ${self.response_body}. Set var.allowed_ssh_cidr explicitly to bypass auto-detection."
+    }
+  }
+}
+
+locals {
+  # Effective allowed CIDR for SSH + kube-apiserver. Prefer user override;
+  # otherwise use auto-detected public IP pinned to /32.
+  effective_allowed_cidr = var.allowed_ssh_cidr != "" ? var.allowed_ssh_cidr : "${chomp(data.http.my_public_ip.response_body)}/32"
+
+  # Safe default spot ceilings — ~40% of on-demand for t4g.small in us-east-1,
+  # ~25% above historical spot median. If market spikes above this, handoff
+  # fires and cluster self-heals on a cheaper capacity pool instead of you
+  # silently paying 7× on-demand all month. Applied ONLY when user leaves the
+  # corresponding *_spot_max_price var at its empty-string default.
+  default_master_spot_max = "0.006"
+  default_worker_spot_max = "0.006"
+
+  effective_master_spot_max = var.master_spot_max_price != "" ? var.master_spot_max_price : local.default_master_spot_max
+  effective_worker_spot_max = var.worker_spot_max_price != "" ? var.worker_spot_max_price : local.default_worker_spot_max
+
+  # 1-master mode needs ASG max=2 for the hot-potato headroom (handoff sets
+  # desired=2 temporarily to get a candidate replacement). master_count=3 HA
+  # mode disables hot-potato and uses exact-count raft members, so max must
+  # equal desired.
+  master_asg_max_size = var.master_count == 1 ? 2 : var.master_count
+
+  # AWS region the provider is deployed into (used inside userdata templates
+  # for aws ec2 associate-address + describe calls)
+  region = data.aws_region.current.name
+}
+
+data "aws_region" "current" {}
+
 data "aws_availability_zones" "available" {
   state = "available"
 }
@@ -68,7 +117,7 @@ resource "aws_security_group" "cluster" {
     from_port   = 22
     to_port     = 22
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+    cidr_blocks = [local.effective_allowed_cidr]
   }
 
   ingress {
@@ -76,7 +125,7 @@ resource "aws_security_group" "cluster" {
     from_port   = 6443
     to_port     = 6443
     protocol    = "tcp"
-    cidr_blocks = [var.allowed_ssh_cidr]
+    cidr_blocks = [local.effective_allowed_cidr]
   }
 
   # Everything within the SG trusts everything else in the SG:
@@ -203,7 +252,7 @@ locals {
     handoff_port       = var.handoff_port
     pod_cidr           = var.pod_cidr
     kubernetes_version = var.kubernetes_version
-    aws_region         = var.aws_region
+    aws_region         = local.region
 
     pyreceiver_py                  = local.pyreceiver_py
     common_sh                      = local.common_sh
@@ -222,7 +271,7 @@ locals {
   worker_userdata = templatefile("${local.scripts_dir}/worker/bootstrap-worker.sh.tpl", {
     handoff_port       = var.handoff_port
     kubernetes_version = var.kubernetes_version
-    aws_region         = var.aws_region
+    aws_region         = local.region
 
     pyreceiver_py                  = local.pyreceiver_py
     common_sh                      = local.common_sh
@@ -272,7 +321,7 @@ resource "aws_launch_template" "master" {
   instance_market_options {
     market_type = "spot"
     spot_options {
-      max_price                      = var.master_spot_max_price != "" ? var.master_spot_max_price : null
+      max_price                      = local.effective_master_spot_max
       spot_instance_type             = "one-time"
       instance_interruption_behavior = "terminate"
     }
@@ -296,9 +345,9 @@ resource "aws_launch_template" "master" {
 
 resource "aws_autoscaling_group" "master" {
   name_prefix         = "eks-killer-master-"
-  desired_capacity    = 1
-  min_size            = 1
-  max_size            = 2 # headroom for surge replacement during hot potato
+  desired_capacity    = var.master_count
+  min_size            = var.master_count
+  max_size            = local.master_asg_max_size
   vpc_zone_identifier = [aws_subnet.this.id]
 
   launch_template {
@@ -365,7 +414,7 @@ resource "aws_launch_template" "worker" {
   instance_market_options {
     market_type = "spot"
     spot_options {
-      max_price                      = var.worker_spot_max_price != "" ? var.worker_spot_max_price : null
+      max_price                      = local.effective_worker_spot_max
       spot_instance_type             = "one-time"
       instance_interruption_behavior = "terminate"
     }
@@ -459,7 +508,7 @@ resource "null_resource" "cluster_ready" {
 resource "null_resource" "vpc_instance_cleaner" {
   triggers = {
     vpc_id     = aws_vpc.this.id
-    aws_region = var.aws_region
+    aws_region = local.region
   }
 
   provisioner "local-exec" {

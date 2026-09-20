@@ -67,11 +67,35 @@ EOF
   sysctl --system
 
   log "install_k8s_packages: installing core system packages via apt"
-  systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service 2>/dev/null || true
-  apt-get update -y -o Acquire::Languages=none
-  apt-get install -y --no-install-recommends \
-    -o Dpkg::Use-Pty=0 -o Dpkg::Options::="--force-confdef" -o Dpkg::Options::="--force-confold" \
-    ca-certificates curl gnupg jq netcat-openbsd unzip containerd etcd-client iptables conntrack socat
+  # Mask (not just stop) apt timers + kill any in-progress dpkg/apt so userdata never races
+  systemctl stop apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  systemctl mask apt-daily.timer apt-daily-upgrade.timer unattended-upgrades.service apt-daily.service apt-daily-upgrade.service 2>/dev/null || true
+  killall -9 apt apt-get unattended-upgrades dpkg apt.systemd.daily 2>/dev/null || true
+  # Hard-wait up to 60s for dpkg locks to be released — #1 cause of failed userdata
+  for i in $(seq 1 30); do
+    if ! ( lsof /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || lsof /var/lib/dpkg/lock >/dev/null 2>&1 \
+           || fuser /var/lib/apt/lists/lock >/dev/null 2>&1 2>&1 ); then
+      break
+    fi
+    sleep 2
+  done
+  # Parallel apt downloads (default is 1 per host), turn off recommends/suggests globally
+  cat <<'EOF' > /etc/apt/apt.conf.d/99-eks-killer-speedup
+Acquire::http::Pipeline-Depth "10";
+Acquire::https::Pipeline-Depth "10";
+Acquire::http::No-Cache "true";
+Acquire::https::No-Cache "true";
+Acquire::Queue-Mode "access";
+APT::Install-Recommends "false";
+APT::Install-Suggests "false";
+Acquire::http::Timeout "30";
+Acquire::https::Timeout "30";
+DPkg::Use-Pty "0";
+DPkg::Options {"--force-confdef";"--force-confold";};
+EOF
+  DEBIAN_FRONTEND=noninteractive apt-get update -y -o Acquire::Languages=none
+  DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+    ca-certificates curl gnupg jq netcat-openbsd unzip containerd etcd-client iptables conntrack socat lsof psmisc
 
   # containerd configuration
   mkdir -p /etc/containerd
@@ -207,4 +231,27 @@ ssm_put() {
 ssm_get() {
   local name="$1" region="$2"
   aws ssm get-parameter --region "$region" --name "$name" --with-decryption --query 'Parameter.Value' --output text 2>/dev/null
+}
+
+# Framed, checksummed bundle transfer:
+# Writes a 129-byte ASCII header (ESKSUM magic + SHA-256 + size) followed
+# by raw file contents to stdout. Receivers validate header + checksum
+# before accepting the payload. Header is human-visible for tcpdump debug.
+frame_send() {
+  local file="$1"
+  local size checksum header
+  size="$(stat -c '%s' "$file" 2>/dev/null || wc -c < "$file")"
+  checksum="$(sha256sum "$file" | awk '{print $1}')"
+  # Build a 128-byte fixed header: left-aligned fields, right-padded with spaces.
+  # Layout: "ESKSUM sha256=<64hex> size=<19dec> <padding>\n"
+  #   prefix        = "ESKSUM sha256="                   (14 bytes)
+  #   checksum field = %-64s right-padded                (64 bytes)
+  #   midfix        = " size="                            (6 bytes)
+  #   size field    = %-19s right-padded                 (19 bytes)
+  #   trailing gap  = 25 spaces                          (25 bytes)
+  #   header total  = 14+64+6+19+25                      (128 bytes)
+  #   + newline byte = 129 total framing bytes.
+  printf "ESKSUM sha256=%-64s size=%-19s%25s" "$checksum" "$size" "" | head -c 128
+  printf "\n"
+  cat "$file"
 }

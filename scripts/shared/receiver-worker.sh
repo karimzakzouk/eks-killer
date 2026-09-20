@@ -165,9 +165,20 @@ EIPLO_EOF
   # THE fast-path critical step: this promoted worker now owns the EIP.
   # Without this, kubectl keeps pointing at the (terminated) old master.
   if [ -n "$ALLOC_ID" ] && [ "$ALLOC_ID" != "None" ]; then
-    aws ec2 associate-address --region "$REGION" --instance-id "$self_id" \
-      --allocation-id "$ALLOC_ID" --allow-reassociation >>/var/log/eks-killer.log 2>&1 || true
-    log "receiver: EIP ${EIP_PUBLIC_IP} associated to $self_id"
+    ASSOCIATED=0
+    for i in $(seq 1 12); do
+      if aws ec2 associate-address --region "$REGION" --instance-id "$self_id" \
+        --allocation-id "$ALLOC_ID" --allow-reassociation >>/var/log/eks-killer.log 2>&1; then
+        ASSOCIATED=1
+        break
+      fi
+      sleep 5
+    done
+    if [ "$ASSOCIATED" -eq 1 ]; then
+      log "receiver: EIP ${EIP_PUBLIC_IP} associated to $self_id"
+    else
+      log "receiver: FATAL could not associate EIP $ALLOC_ID to $self_id after 60s retries — EIP STUCK"
+    fi
   else
     log "receiver: WARNING could not discover EIP allocation id, EIP not re-associated"
   fi

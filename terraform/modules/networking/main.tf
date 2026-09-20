@@ -67,7 +67,7 @@ resource "aws_route_table_association" "this" {
 
 resource "aws_security_group" "cluster" {
   name        = "eks-killer-cluster-sg"
-  description = "Single-node-master kubeadm cluster on spot — full intra-SG trust, restricted SSH + API from allowed_cidr"
+  description = "Single-node-master kubeadm cluster on spot - full intra-SG trust, restricted SSH plus API from allowed_cidr"
   vpc_id      = aws_vpc.this.id
 
   ingress {
@@ -87,7 +87,7 @@ resource "aws_security_group" "cluster" {
   }
 
   ingress {
-    description = "All protocols / all ports — intra-cluster SG self-rule (etcd, kubelet, handoff, CNI, NodePorts, etc)"
+    description = "All protocols / all ports - intra-cluster SG self-rule (etcd, kubelet, handoff, CNI, NodePorts, etc)"
     from_port   = 0
     to_port     = 0
     protocol    = "-1"

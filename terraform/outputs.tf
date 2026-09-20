@@ -5,7 +5,7 @@ output "master_ip" {
 
 output "kubectl_cmd" {
   value       = <<EOT
-scp -o StrictHostKeyChecking=no -i '${local.effective_key_path}' ubuntu@${module.networking.master_eip_public_ip}:/etc/kubernetes/admin.conf ~/.kube/eks-killer-admin.conf
+scp -o StrictHostKeyChecking=no -i '${local.effective_key_path}' ubuntu@${module.networking.master_eip_public_ip}:/home/ubuntu/.kube/config ~/.kube/eks-killer-admin.conf
 export KUBECONFIG=~/.kube/eks-killer-admin.conf
 EOT
   description = "Commands to copy the admin kubeconfig off the new master and export KUBECONFIG to point at it."

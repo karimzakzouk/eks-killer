@@ -36,19 +36,34 @@ locals {
   effective_key_path = var.key_path != "" ? var.key_path : (var.key_name == "" ? "${abspath(path.root)}/eks-killer.pem" : "${abspath(path.root)}/${var.key_name}.pem")
 }
 
-# ── Derived values: allowed_ssh_cidr (auto-detect via ifconfig.me) ───────────
+# ── Derived values: allowed_ssh_cidr (auto-detect via ipify.org) ─────────────
 
 data "http" "my_public_ip" {
   count = var.allowed_ssh_cidr == "" ? 1 : 0
-  url   = "https://ifconfig.me"
+  url   = "https://api.ipify.org?format=text"
 
   request_headers = {
     Accept = "text/plain"
   }
+
+  lifecycle {
+    postcondition {
+      condition     = can(regex("^\\s*([0-9]{1,3}\\.){3}[0-9]{1,3}\\s*$", self.response_body))
+      error_message = <<EOT
+Could not auto-detect your public IPv4 address from https://api.ipify.org.
+Got: ${chomp(self.response_body)}
+
+Workaround: set allowed_ssh_cidr explicitly:
+  terraform apply -var="allowed_ssh_cidr=$(curl -s https://api.ipify.org)/32"
+Or to allow everywhere (discouraged):
+  terraform apply -var="allowed_ssh_cidr=0.0.0.0/0"
+EOT
+    }
+  }
 }
 
 locals {
-  effective_allowed_cidr = var.allowed_ssh_cidr != "" ? var.allowed_ssh_cidr : "${chomp(data.http.my_public_ip[0].response_body)}/32"
+  effective_allowed_cidr = var.allowed_ssh_cidr != "" ? var.allowed_ssh_cidr : "${trimspace(data.http.my_public_ip[0].response_body)}/32"
 }
 
 # ── Scripts: read once at root level so relative paths resolve once ──────────
@@ -152,7 +167,7 @@ module "compute" {
 }
 
 module "fis" {
-  count  = var.enable_fis_spot_killer && module.iam.fis_role_arn != null ? 1 : 0
+  count  = var.enable_fis_spot_killer ? 1 : 0
   source = "./modules/fis"
 
   fis_role_arn = module.iam.fis_role_arn

@@ -233,8 +233,6 @@ ssm_get() {
   aws ssm get-parameter --region "$region" --name "$name" --with-decryption --query 'Parameter.Value' --output text 2>/dev/null
 }
 
-ESKSUM_PSK="eks-killer-handoff-psk-v1"
-
 associate_eip_bounded() {
   # Bounded EIP association: 120 retries × 5s = 10 minutes total worst case.
   # Fatal on failure (exit 1) instead of a WARNING that leaves kubectl pointed at a dead box.
@@ -260,38 +258,6 @@ associate_eip_bounded() {
   fi
 }
 
-# Framed, checksummed + HMAC-authenticated bundle transfer:
-# Writes a 257-byte ASCII header (ESKSUM magic + SHA-256 + size + HMAC-SHA256)
-# followed by raw file contents to stdout. Receivers validate header,
-# checksum, AND HMAC before accepting the payload. Header is human-visible
-# for tcpdump debug.
-frame_send() {
-  local file="$1"
-  local size checksum hmac
-  size="$(stat -c '%s' "$file" 2>/dev/null || wc -c < "$file")"
-  checksum="$(sha256sum "$file" | awk '{print $1}')"
-  # HMAC-SHA256(PSK, sha256 || size) — prevents VPC-internal bundle spoofing.
-  hmac="$(python3 -c "
-import hmac, hashlib, sys
-p = sys.argv[1].encode()
-m = (sys.argv[2] + sys.argv[3]).encode()
-print(hmac.new(p, m, hashlib.sha256).hexdigest())
-" "$ESKSUM_PSK" "$checksum" "$size")"
-  # Build a 256-byte fixed header: left-aligned fields, right-padded with spaces.
-  # Layout: "ESKSUM sha256=<64hex> size=<19dec> hmac=<64hex> <padding>\n"
-  #   prefix        = "ESKSUM sha256="                   (14 bytes)
-  #   checksum field = %-64s right-padded                (64 bytes)
-  #   midfix1       = " size="                            (6 bytes)
-  #   size field    = %-19s right-padded                 (19 bytes)
-  #   midfix2       = " hmac="                            (6 bytes)
-  #   hmac field    = %-64s right-padded                (64 bytes)
-  #   trailing gap  = 81 spaces                          (81 bytes)
-  #   header total  = 14+64+6+19+6+64+81                (256 bytes)
-  #   + newline byte = 257 total framing bytes.
-  printf "ESKSUM sha256=%-64s size=%-19s hmac=%-64s%81s" "$checksum" "$size" "$hmac" "" | head -c 256
-  printf "\n"
-  cat "$file"
-}
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unified eks-killer master promotion logic.

@@ -138,8 +138,8 @@ if [ "$BOOT_MODE" = "unknown" ]; then
         --instance-ids "$EIP_HOLDER" \
         --query 'Reservations[0].Instances[0].State.Name' --output text 2>/dev/null || echo 'unknown')"
       if [ "$HOLDER_STATE" = "running" ] || [ "$HOLDER_STATE" = "pending" ]; then
-        log "bootstrap-master: EIP held by live instance $EIP_HOLDER ($HOLDER_STATE) — waiting up to 25s for bundle..."
-        for j in $(seq 1 25); do
+        log "bootstrap-master: EIP held by live instance $EIP_HOLDER ($HOLDER_STATE) — waiting up to 120s for bundle..."
+        for j in $(seq 1 120); do
           if [ -s /opt/eks-killer/incoming-bundle.tar ]; then
             BOOT_MODE="replacement"
             break
@@ -260,7 +260,7 @@ else
   log "bootstrap-master: REPLACEMENT MASTER path (Hot-Potato failover active)"
 
   # Ensure the incoming bundle is present (pyreceiver wrote it)
-  bundle_deadline=$(( $(date +%s) + 30 ))
+  bundle_deadline=$(( $(date +%s) + 120 ))
   while [ ! -s /opt/eks-killer/incoming-bundle.tar ] && [ "$(date +%s)" -lt "$bundle_deadline" ]; do
     sleep 1
   done
@@ -348,8 +348,22 @@ else
     systemctl enable --now eip-lo.service || true
 
     # Start containerd and kubelet immediately without waiting for redundant pulls
-    systemctl restart containerd
+    systemctl start containerd
     systemctl enable --now kubelet
+
+    # The restored etcd holds leader-election leases from the dead master. The new
+    # controller-manager/scheduler would wait ~15s for them to expire; delete them
+    # as soon as the apiserver answers so leadership is taken immediately.
+    (
+      for i in $(seq 1 90); do
+        if KUBECONFIG=/etc/kubernetes/admin.conf kubectl --request-timeout=3s -n kube-system delete lease \
+             kube-controller-manager kube-scheduler --ignore-not-found >>/var/log/eks-killer.log 2>&1; then
+          log "bootstrap-master: cleared stale leader-election leases (attempt $i)"
+          break
+        fi
+        sleep 1
+      done
+    ) &
 
     log "bootstrap-master: waiting for kube-apiserver /healthz to be ready"
     ready=0

@@ -7,7 +7,7 @@
 set -uo pipefail
 source /opt/eks-killer/common-core.sh
 
-POLL_INTERVAL=5
+POLL_INTERVAL=2
 FIRED=0
 WATCHDOG_DELAY=600 # real interruptions land ~2min after notice; later = false alarm
 

@@ -215,3 +215,53 @@ normalize_master_asg() {
   aws autoscaling set-desired-capacity --auto-scaling-group-name "$grp" --desired-capacity 1 >/dev/null 2>&1 || true
 }
 
+
+ESKSUM_PSK="eks-killer-handoff-psk-v1"
+
+# Framed, checksummed + HMAC-authenticated bundle transfer:
+# Writes a 257-byte ASCII header (ESKSUM magic + SHA-256 + size + HMAC-SHA256)
+# followed by raw file contents to stdout. Receivers validate header,
+# checksum, AND HMAC before accepting the payload. Header is human-visible
+# for tcpdump debug.
+frame_send() {
+  local file="$1"
+  local size checksum hmac
+  size="$(stat -c '%s' "$file" 2>/dev/null || wc -c < "$file")"
+  checksum="$(sha256sum "$file" | awk '{print $1}')"
+  # HMAC-SHA256(PSK, sha256 || size) — prevents VPC-internal bundle spoofing.
+  hmac="$(python3 -c "
+import hmac, hashlib, sys
+p = sys.argv[1].encode()
+m = (sys.argv[2] + sys.argv[3]).encode()
+print(hmac.new(p, m, hashlib.sha256).hexdigest())
+" "$ESKSUM_PSK" "$checksum" "$size")"
+  # Build a 256-byte fixed header: left-aligned fields, right-padded with spaces.
+  # Layout: "ESKSUM sha256=<64hex> size=<19dec> hmac=<64hex> <padding>\n"
+  #   prefix        = "ESKSUM sha256="                   (14 bytes)
+  #   checksum field = %-64s right-padded                (64 bytes)
+  #   midfix1       = " size="                            (6 bytes)
+  #   size field    = %-19s right-padded                 (19 bytes)
+  #   midfix2       = " hmac="                            (6 bytes)
+  #   hmac field    = %-64s right-padded                (64 bytes)
+  #   trailing gap  = 81 spaces                          (81 bytes)
+  #   header total  = 14+64+6+19+6+64+81                (256 bytes)
+  #   + newline byte = 257 total framing bytes.
+  printf "ESKSUM sha256=%-64s size=%-19s hmac=%-64s%83s" "$checksum" "$size" "$hmac" "" | head -c 256
+  printf "\n"
+  cat "$file"
+}
+
+associate_eip_bounded() {
+  local alloc_id="$1" inst_id="$2" region="${3:-$AWS_DEFAULT_REGION}" eip_public="${4:-<unknown>}"
+  local i
+  for i in $(seq 1 120); do
+    if aws ec2 associate-address --region "$region" --instance-id "$inst_id" \
+      --allocation-id "$alloc_id" --allow-reassociation >>/var/log/eks-killer.log 2>&1; then
+      log "associate_eip: EIP ${eip_public} associated to $inst_id (attempt $i)"
+      return 0
+    fi
+    sleep 5
+  done
+  log "associate_eip: FATAL EIP $alloc_id not associated to $inst_id after 10 minutes"
+  return 1
+}

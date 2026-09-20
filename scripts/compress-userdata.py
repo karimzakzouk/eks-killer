@@ -35,4 +35,6 @@ result = tpl
 for key, val in scripts.items():
     result = result.replace("${" + key + "}", val)
 
+result = result.replace("$${", "${")
+
 print(json.dumps({"userdata": result}))

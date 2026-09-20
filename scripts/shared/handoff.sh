@@ -6,6 +6,7 @@
 
 set -uo pipefail
 source /opt/eks-killer/common-core.sh
+type frame_send >/dev/null 2>&1 || { log "handoff: FATAL frame_send not defined"; exit 1; }
 
 REGION="$(self_region)"
 export AWS_DEFAULT_REGION="$REGION"
@@ -89,7 +90,7 @@ nc_send() {
   # Stream stdin to $ip:$HANDOFF_PORT and require the receiver's OK reply.
   # Returns nonzero on refused/failed/empty delivery instead of failing silently.
   local ip="$1" resp
-  resp="$(nc -w 60 "$ip" "$HANDOFF_PORT" 2>/dev/null)"
+  resp="$(nc -N -w 30 "$ip" "$HANDOFF_PORT" 2>/dev/null)"
   if [[ "$resp" != *"OK"* ]]; then
     log "handoff: FATAL bundle delivery to $ip failed (no OK reply)"
     return 1
@@ -107,7 +108,7 @@ send_bundle() {
     log "handoff: framed transfer mode (checksum+size framed) for worker fast-path bundle"
     frame_send "$framed_source" | nc_send "$ip" || return 1
   else
-    if [ -f "/opt/eks-killer/bundle/k8s-images.tar" ]; then
+    if [ "${SEND_IMAGES:-0}" = "1" ] && [ -f "/opt/eks-killer/bundle/k8s-images.tar" ]; then
       log "handoff: peer-streaming etcd+pki bundle AND k8s-images.tar to fresh instance (composite framed, checksum-verified)"
       framed_source="/tmp/eks-killer-composite-bundle-$$.tar"
       tar -C /opt/eks-killer/bundle -cf "$framed_source" handoff-bundle.tar.gz k8s-images.tar
